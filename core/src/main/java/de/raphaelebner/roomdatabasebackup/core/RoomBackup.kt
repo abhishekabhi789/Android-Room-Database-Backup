@@ -5,7 +5,9 @@ import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
+import android.net.Uri
 import android.os.Build
+import android.provider.OpenableColumns
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -57,6 +59,8 @@ class RoomBackup(var context: Context) {
         private var currentProcess: Int? = null
         private const val PROCESS_BACKUP = 1
         private const val PROCESS_RESTORE = 2
+        private const val BACKUP_EXTENSION_ENCRYPTED = "aes"
+        private const val BACKUP_EXTENSION_UNENCRYPTED = "sqlite3"
         private var backupFilename: String? = null
 
         /** Code for internal backup location, used for [backupLocation] */
@@ -570,10 +574,11 @@ class RoomBackup(var context: Context) {
      * @param source File
      */
     private fun doRestore(source: File) {
+        val fileExtension = source.extension
+        if (!isChosenFileValid(fileExtension)) return
         // Close the database
         roomDatabase!!.close()
         roomDatabase = null
-        val fileExtension = source.extension
         if (backupIsEncrypted) {
             copy(source, TEMP_BACKUP_FILE)
             val decryptedBytes = decryptBackup() ?: return
@@ -739,6 +744,8 @@ class RoomBackup(var context: Context) {
                     ActivityResultContracts.OpenDocument()
             ) { result ->
                 if (result != null) {
+                    val fileExtension = getFileExtension(result)
+                    if (fileExtension == null || !isChosenFileValid(fileExtension)) return@registerForActivityResult
                     val inputstream = context.contentResolver.openInputStream(result)!!
                     doRestore(inputstream)
                     return@registerForActivityResult
@@ -837,5 +844,67 @@ class RoomBackup(var context: Context) {
             }
         }
         return true
+    }
+
+    /**
+     * Gets the file extension of the [Uri] using ContentResolver.
+     */
+    private fun getFileExtension(uri: Uri): String? {
+        var fileName: String? = null
+        val cursor = context.contentResolver.query(uri, null, null, null, null)
+        cursor?.use {
+            if (it.moveToFirst()) {
+                val indexOfNameColumn = it.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if (indexOfNameColumn >= 0) fileName = it.getString(indexOfNameColumn)
+            }
+        }
+        return fileName?.substringAfterLast(".")
+    }
+
+    /**
+     * Validating the chosen file with it's [File.extension]
+     */
+    private fun isChosenFileValid(fileExtension:String): Boolean {
+        return when {
+            backupIsEncrypted && fileExtension == BACKUP_EXTENSION_ENCRYPTED -> true
+            !backupIsEncrypted && fileExtension == BACKUP_EXTENSION_UNENCRYPTED -> true
+            backupIsEncrypted && fileExtension == BACKUP_EXTENSION_UNENCRYPTED -> {
+                if (enableLogDebug) Log.d(TAG,
+                    "isChosenFileValid: chosen file is unencrypted while encrypted file is expected"
+                )
+                onCompleteListener?.onComplete(
+                    false,
+                    "chosen file is unencrypted while encrypted file is expected",
+                    OnCompleteListener.EXIT_CODE_ERROR_DECRYPTION_ERROR
+                )
+                false
+            }
+            !backupIsEncrypted && fileExtension == BACKUP_EXTENSION_ENCRYPTED -> {
+                if (enableLogDebug)
+                    Log.d(
+                        TAG,
+                        "isChosenFileValid: chosen file is encrypted while unencrypted file is expected"
+                    )
+                onCompleteListener?.onComplete(
+                    false,
+                    "chosen file is encrypted while unencrypted file is expected",
+                    OnCompleteListener.EXIT_CODE_ERROR_RESTORE_BACKUP_IS_ENCRYPTED
+                )
+                false
+            }
+            else -> {
+                if (enableLogDebug)
+                    Log.d(
+                        TAG,
+                        "isChosenFileValid: chosen file is of wrong extension: $fileExtension"
+                    )
+                onCompleteListener?.onComplete(
+                    false,
+                    "failed to verify the chosen file",
+                    OnCompleteListener.EXIT_CODE_ERROR
+                )
+                false
+            }
+        }
     }
 }
